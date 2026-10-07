@@ -1,0 +1,148 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: wirecloud-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: wirecloud
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - wirecloud-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: elasticsearch:2.4
+    container_name: wirecloud-elasticsearch
+    restart: always
+    command: elasticsearch -Des.index.max_result_window=50000
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - wirecloud-net
+
+  memcached:
+    image: memcached:1
+    container_name: wirecloud-memcached
+    restart: always
+    command: memcached -m 512m
+    networks:
+      - wirecloud-net
+
+  wirecloud:
+    image: fiware/wirecloud:latest
+    container_name: wirecloud
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+      memcached:
+        condition: service_started
+    expose:
+      - "8000"
+    environment:
+      - DEBUG=False
+      - DEFAULT_THEME=wirecloud.defaulttheme
+      - DB_HOST=postgres
+      - DB_PASSWORD=wirecloud
+      - FORWARDED_ALLOW_IPS=*
+      - ELASTICSEARCH2_URL=http://elasticsearch:9200/
+      - MEMCACHED_LOCATION=memcached:11211
+    volumes:
+      - wirecloud-data:/opt/wirecloud_instance/data
+      - wirecloud-static:/var/www/static
+    networks:
+      - wirecloud-net
+
+  nginx:
+    image: nginx:stable
+    container_name: wirecloud-nginx
+    restart: always
+    depends_on:
+      - wirecloud
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - wirecloud-static:/var/www/static:ro
+    networks:
+      - wirecloud-net
+
+  mongo:
+    image: mongo:4.4
+    container_name: orion-mongo
+    restart: always
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - wirecloud-net
+
+  orion-ld:
+    image: fiware/orion-ld:latest
+    container_name: orion-ld
+    hostname: orion-ld
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    command: -dbhost mongo -logLevel ERROR
+    ports:
+      - "1026:1026"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:1026/version"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    networks:
+      - wirecloud-net
+
+  # Banco de dados temporal usado pelo QuantumLeap
+  crate-db:
+    image: crate:latest
+    container_name: fiware-crate-db
+    hostname: crate-db
+    restart: unless-stopped
+    ports:
+      - "4200:4200"
+    volumes:
+      - crate-data:/data
+    command:
+      - crate
+      - -Cauth.host_based.enabled=false
+      - -Cdiscovery.type=single-node
+    networks:
+      - wirecloud-net
+
+  # Persistência e consulta de séries temporais NGSI
+  quantumleap:
+    image: orchestracities/quantumleap:latest
+    container_name: fiware-quantumleap
+    hostname: quantumleap
+    restart: unless-stopped
+    depends_on:
+      - crate-db
+    ports:
+      - "8668:8668"
+    environment:
+      CRATE_HOST: crate-db
+      CRATE_PORT: 4200
+    networks:
+      - wirecloud-net
+
+volumes:
+  mongo-data:
+  crate-data:
+  postgres-data:
+  elasticsearch-data:
+  wirecloud-data:
+  wirecloud-static:
+
+networks:
+  wirecloud-net:
+    driver: bridge
+    name: fiware-net
