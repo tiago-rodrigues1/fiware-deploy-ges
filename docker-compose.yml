@@ -80,6 +80,15 @@ services:
     restart: always
     volumes:
       - mongo-data:/data/db
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'echo ''db.runCommand("ping").ok'' | mongo localhost:27017/test --quiet',
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
     networks:
       - wirecloud-net
 
@@ -89,54 +98,83 @@ services:
     hostname: orion-ld
     restart: unless-stopped
     depends_on:
-      - mongo
+      mongo:
+        condition: service_healthy
     command: -dbhost mongo -logLevel ERROR
     ports:
       - "1026:1026"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://0.0.0.0:1026/version"]
+      test: ["CMD", "curl", "-f", "http://localhost:1026/version"]
       interval: 10s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 15s
     networks:
       - wirecloud-net
 
-  # Banco de dados temporal usado pelo QuantumLeap
-  crate-db:
-    image: crate:latest
-    container_name: fiware-crate-db
-    hostname: crate-db
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mosquitto
+    hostname: mosquitto
     restart: unless-stopped
     ports:
-      - "4200:4200"
+      - "1883:1883"
+    command: mosquitto -c /mosquitto-no-auth.conf
     volumes:
-      - crate-data:/data
-    command:
-      - crate
-      - -Cauth.host_based.enabled=false
-      - -Cdiscovery.type=single-node
+      - mosquitto-data:/mosquitto/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mosquitto_sub -h localhost -t '$$SYS/#' -C 1 -W 3 || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - wirecloud-net
 
-  # Persistência e consulta de séries temporais NGSI
-  quantumleap:
-    image: orchestracities/quantumleap:latest
-    container_name: fiware-quantumleap
-    hostname: quantumleap
+  iot-agent:
+    image: telefonicaiot/iotagent-json:latest
+    container_name: fiware-iot-agent
+    hostname: iot-agent
     restart: unless-stopped
     depends_on:
-      - crate-db
+      mongo:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+      orion-ld:
+        condition: service_healthy
     ports:
-      - "8668:8668"
+      - "4041:4041"
+      - "7896:7896"
     environment:
-      CRATE_HOST: crate-db
-      CRATE_PORT: 4200
+      - IOTA_CB_HOST=orion-ld
+      - IOTA_CB_PORT=1026
+      - IOTA_CB_NGSI_VERSION=ld
+      - IOTA_JSON_LD_CONTEXT=https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld
+      - IOTA_FALLBACK_TENANT=openiot
+      - IOTA_APPEND_MODE=true
+      - IOTA_NORTH_PORT=4041
+      - IOTA_REGISTRY_TYPE=mongodb
+      - IOTA_MONGO_URI=mongodb://mongo:27017/iotagentjson
+      - IOTA_MQTT_HOST=mosquitto
+      - IOTA_MQTT_PORT=1883
+      - IOTA_HTTP_PORT=7896
+      - IOTA_DEFAULT_RESOURCE=/iot/json
+      - IOTA_PROVIDER_URL=http://iot-agent:4041
+      - IOTA_AUTOCACHE=true
+      - IOTA_AUTOCAST=true
+      - IOTA_TIMESTAMP=true
+      - IOTA_LOG_LEVEL=DEBUG
+      - IOTA_DEFAULT_EXPRESSION_LANGUAGE=jexl
     networks:
       - wirecloud-net
 
 volumes:
+  mosquitto-data:
   mongo-data:
-  crate-data:
   postgres-data:
   elasticsearch-data:
   wirecloud-data:
@@ -145,4 +183,3 @@ volumes:
 networks:
   wirecloud-net:
     driver: bridge
-    name: fiware-net
